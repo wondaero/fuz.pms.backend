@@ -1,5 +1,5 @@
 {
-  "name": "service.chat",
+  "name": "fuz.pms.backend",
   "version": "1.0.0",
   "description": "",
   "main": "index.js",
@@ -10,7 +10,7 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/wondaero/service.chat.git"
+    "url": "git+https://github.com/wondaero/fuz.pms.backend.git"
   },
   "keywords": [],
   "author": "",

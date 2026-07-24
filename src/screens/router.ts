@@ -88,7 +88,7 @@ router.get("/dashboard", authMiddleware, async (req, res) => {
         const cstmProjectData = currentProject.rows.map((p: RawProject) => {
             return ({
                 ...p,
-                budget: authFilter() ? p.budget : '***',
+                budget: authFilter() ? Number(p.budget) : '***',
                 totalCost: authFilter() ? (p.participants.reduce((prev: number, curr: Participant) => prev + Number(curr.monthly_cost), 0) || 0) : '***',
                 participants: p.participants.map((u: Participant) => ({ id: u.id, name: u.name }))
             })
@@ -102,7 +102,7 @@ router.get("/dashboard", authMiddleware, async (req, res) => {
             data: {
                 screenPermission: cstmScreenPermission,
                 projects: cstmProjectData,
-                allBudge: authFilter() ? cstmProjectData.reduce((prev: number, curr: RawProject) => prev + Number(curr.budget), 0) : '***',
+                allBudget: authFilter() ? cstmProjectData.reduce((prev: number, curr: RawProject) => prev + Number(curr.budget), 0) : '***',
                 allCost: authFilter() ? cstmProjectData.reduce((prev: number, curr: RawProject) => prev + (curr.totalCost || 0), 0) : '***',
                 // 🎯 예산 초과(totalBudget < totalCost) 혹은 종료 일자가 지났는데 완료되지 않은 경우(new Date(p.end_date) < today) 경고 카운트!
                 warningCnt: authFilter()
@@ -122,5 +122,104 @@ router.get("/dashboard", authMiddleware, async (req, res) => {
         return res.status(500).json({ message: "서버 오류가 발생했습니다." })
     }
 });
+// router.get("/resource-status", authMiddleware, async (req, res) => {
+router.get("/resource-status", async (req, res) => {
+
+    // const userAuth = (req as any).user?.auth;
+    // const userId = (req as any).user?.id;
+    // const userDept = (req as any).user?.dept;
+
+    const today = new Date();
+    const year = today.getFullYear();
+    const month = (today.getMonth() + 1);
+
+    const monthStart = `${year}-${month.toString().padStart(2, '0')}-01`;
+    const monthEnd = new Date(year, month, 0).toISOString().split('T')[0];
+
+    try {
+        const screenPermission = await pool.query("SELECT * FROM screen_permissions WHERE screen_id = 'RESOURCE_STATUS'");
+        const cstmScreenPermission: Record<string, { name: string; allow: boolean }> = {};
+        screenPermission.rows.forEach((d: any) => {
+            cstmScreenPermission[d.feature_code] = {
+                name: d.feature_name,
+                // allow: userAuth === 'USER' ? d.allow_user : d.allow_admin,
+                allow: true,
+            }
+        });
+        const projectQuery = `
+            SELECT 
+                pj.id,
+                pj.name,
+                pj.project_type,
+                TO_CHAR(pj.start_date, 'YYYY-MM-DD') AS start_date,
+                TO_CHAR(pj.end_date, 'YYYY-MM-DD') AS end_date,
+                pj.status,
+                pj.dept,
+                pj.note,
+                COALESCE(
+                    JSON_AGG(
+                        JSON_BUILD_OBJECT(
+                            'id', pt.user_id,
+                            'name', u.name,
+                            'mm_value', pt.mm_value,
+                            'start_date', pt.start_date,
+                            'end_date', pt.end_date,
+                            'role', u.role,
+                            -- 🎯 [마법의 스칼라 서브쿼리] 이 직원이 현재 참여중인 모든 프로젝트 일정을 직접 집계!
+                            'all_projects', COALESCE(
+                                (
+                                    SELECT JSON_AGG(
+                                        JSON_BUILD_OBJECT(
+                                            'project_id', sub_pt.project_id,
+                                            'project_name', sub_pj.name,
+                                            'start_date', sub_pt.start_date,
+                                            'end_date', sub_pt.end_date,
+                                            'mm_value', sub_pt.mm_value
+                                        )
+                                    )
+                                    FROM participants AS sub_pt
+                                    JOIN projects AS sub_pj ON sub_pt.project_id = sub_pj.id
+                                    WHERE sub_pt.user_id = pt.user_id
+                                ),
+                                '[]'::json
+                            )
+                        )
+                    ) FILTER (WHERE pt.id IS NOT NULL),
+                     '[]'::json
+                ) AS participants
+            FROM projects AS pj
+            LEFT JOIN participants AS pt ON pj.id = pt.project_id
+            LEFT JOIN users AS u ON pt.user_id = u.id
+            WHERE pj.status != '${PROJECT_STATUS.COMPLETED}'
+              AND pj.start_date <= '${monthEnd}'
+              AND pj.end_date >= '${monthStart}'
+            GROUP BY pj.id
+            ORDER BY pj.start_date DESC;
+        `;
+        const currentProject = await pool.query(projectQuery);
+
+        // const authFilter = () => userAuth !== 'USER';
+
+        const cstmProjectData = currentProject.rows.map((p: RawProject) => {
+            return ({
+                ...p,
+                // participants: p.participants.map((u: Participant) => ({ id: u.id, name: u.name }))
+            })
+        })
+
+        return res.status(200).json({
+            message: `성공적으로 '${month}월'의 리소스 데이터를 가져왔습니다.`,
+            data: {
+                screenPermission: cstmScreenPermission,
+                projects: cstmProjectData,
+            }
+        });
+    }
+    catch (err) {
+        console.error("리소스 데이터 조회 에러:", err);
+        return res.status(500).json({ message: "서버 오류가 발생했습니다." })
+    }
+});
+
 
 export default router;

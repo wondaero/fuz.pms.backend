@@ -200,6 +200,20 @@
         });
 
       }
+      document.getElementById('initPage_resource').onclick = async () => {
+
+        // 🎯 1. 함수 내부에서 토큰을 가져오도록 변수 선언 추가!
+        const token = window.localStorage.getItem('fuzDataToken');
+
+        const response = await fetch("http://localhost:3000/screen/resource-status", {
+          method: "GET",
+          headers: {
+            "Content-Type": "application/json",
+            "Authorization": `Bearer ${token}`
+          },
+        });
+
+      }
 
 
     })
@@ -208,6 +222,7 @@
   <div>
     <h2>7. 페이지 버튼</h2>
     <button id="initPage_dashboard">대시보드 페이지</button>
+    <button id="initPage_resource">M/M 자원 배정 플래너 페이지</button>
     <button id="initPage_projects">프로젝트 페이지</button>
   </div>
   <hr />
