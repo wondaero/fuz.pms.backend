@@ -215,6 +215,21 @@
 
       }
 
+      document.getElementById('getPprojectResourceBtn').onclick = async (e) => {
+        const project_id = e.target.closest('div').querySelector('[data-id="project"] input').value;
+        const targetDate = e.target.closest('div').querySelector('[data-id="date"] input').value;
+        const token = window.localStorage.getItem('fuzDataToken');
+
+        const response = await fetch("http://localhost:3000/project/resource" + "?targetDate=" + targetDate + "&project_id=" + project_id, {
+          method: "GET",
+          headers: {
+            "Content-Type": "application/json",
+            "Authorization": `Bearer ${token}`
+          },
+        });
+
+      }
+
 
     })
   </script>
@@ -230,7 +245,7 @@
         <strong>연월(yyyy-mm)</strong>
         <input type="text">
       </label>
-      <button>프로젝트 조회</button>
+      <button id="getPprojectResourceBtn">프로젝트 조회</button>
     </div>
   </div>
   <hr />
