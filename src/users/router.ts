@@ -3,6 +3,7 @@ import { authMiddleware } from "../middlewares/authMiddleware";
 import jwt from "jsonwebtoken";
 import pool from "../db"
 import bcrypt from "bcryptjs";
+import { PROJECT_STATUS } from "../../common/constants";
 
 const SECRET_KEY = "test1";
 
@@ -694,6 +695,220 @@ router.get("/:userId", authMiddleware, async (req, res) => {
   }
 
 
+});
+
+const targetMonth = (targetDate: string) => {
+  const yearMonth = targetDate.split('-');
+
+  const year = yearMonth[0];
+  const month = yearMonth[1];
+
+  if (!year || !month) {
+    console.log('잘못된 값입니다.')
+    return;
+  }
+
+  // 타임존 버그를 피하기 위해 padStart 및 로직 보강
+  const monthStart = `${year}-${month.padStart(2, '0')}-01`;
+
+  // 타임존 오프셋 안전한 말일 계산법 (로컬 날짜 추출)
+  const lastDay = new Date(Number(year), Number(month), 0);
+  const monthEnd = `${lastDay.getFullYear()}-${(lastDay.getMonth() + 1).toString().padStart(2, '0')}-${lastDay.getDate().toString().padStart(2, '0')}`;
+
+  return { month, monthStart, monthEnd };
+}
+
+router.get("/resource/project", authMiddleware, async (req, res) => {
+  const { project_id, target_date } = req.query as { project_id?: string; target_date: string };
+
+  if (!project_id || !target_date) {
+    return res.status(400).json({ message: "필수 파라미터가 누락됐습니다." });
+  }
+
+  const userAuth = (req as any).user?.auth;
+  const userDept = (req as any).user?.dept;
+  // const userId = (req as any).user?.id;
+
+  const yearMonth = target_date.split('-');
+
+  const year = yearMonth[0];
+  const month = yearMonth[1];
+
+  if (!year || !month) {
+    return res.status(400).json({ message: "잘못된 요청값 입니다." });
+  }
+
+  // 타임존 버그를 피하기 위해 padStart 및 로직 보강
+  const monthStart = `${year}-${month.padStart(2, '0')}-01`;
+
+  // 타임존 오프셋 안전한 말일 계산법 (로컬 날짜 추출)
+  const lastDay = new Date(Number(year), Number(month), 0);
+  const monthEnd = `${lastDay.getFullYear()}-${(lastDay.getMonth() + 1).toString().padStart(2, '0')}-${lastDay.getDate().toString().padStart(2, '0')}`;
+
+  try {
+    const queryParams: any[] = [monthEnd, monthStart];
+
+    let whereClause = `
+            WHERE pj.status != '${PROJECT_STATUS.COMPLETED}'
+              AND pj.start_date <= $1
+              AND pj.end_date >= $2
+        `;
+
+    if (userAuth === 'USER') {
+      queryParams.push(userDept);
+      whereClause += ` AND pj.dept = $${queryParams.length}`;
+    }
+
+    if (project_id) {
+      queryParams.push(parseInt(project_id, 10));
+      whereClause += ` AND pj.id = $${queryParams.length}`;
+    }
+
+    const projectQuery = `
+            SELECT 
+                pj.id,
+                pj.name,
+                pj.project_type,
+                TO_CHAR(pj.start_date, 'YYYY-MM-DD') AS start_date,
+                TO_CHAR(pj.end_date, 'YYYY-MM-DD') AS end_date,
+                pj.status,
+                pj.dept,
+                pj.note,
+                COALESCE(
+                    JSON_AGG(
+                        JSON_BUILD_OBJECT(
+                            'id', pt.user_id,
+                            'name', u.name,
+                            'mm_value', pt.mm_value,
+                            'start_date', pt.start_date,
+                            'end_date', pt.end_date,
+                            'role', u.role,
+                            -- 🎯 [마법의 스칼라 서브쿼리] 이 직원이 현재 참여중인 모든 프로젝트 일정을 직접 집계!
+                            'all_projects', COALESCE(
+                                (
+                                    SELECT JSON_AGG(
+                                        JSON_BUILD_OBJECT(
+                                            'project_id', sub_pt.project_id,
+                                            'project_name', sub_pj.name,
+                                            'start_date', sub_pt.start_date,
+                                            'end_date', sub_pt.end_date,
+                                            'mm_value', sub_pt.mm_value
+                                        )
+                                    )
+                                    FROM participants AS sub_pt
+                                    JOIN projects AS sub_pj ON sub_pt.project_id = sub_pj.id
+                                    WHERE sub_pt.user_id = pt.user_id
+                                ),
+                                '[]'::json
+                            )
+                        )
+                    ) FILTER (WHERE pt.id IS NOT NULL),
+                     '[]'::json
+                ) AS participants
+            FROM projects AS pj
+            LEFT JOIN participants AS pt ON pj.id = pt.project_id
+            LEFT JOIN users AS u ON pt.user_id = u.id
+            ${whereClause}
+            GROUP BY pj.id
+            ORDER BY pj.start_date DESC;
+        `;
+    const targetProjects = await pool.query(projectQuery, queryParams);
+
+
+    const cstmProjectData = targetProjects.rows;
+
+    return res.status(200).json({
+      message: `성공적으로 '${month}월'의 리소스 데이터를 가져왔습니다.`,
+      data: {
+        projects: cstmProjectData,
+      }
+    });
+  }
+  catch (err) {
+    console.error("리소스 데이터 조회 에러:", err);
+    return res.status(500).json({ message: "서버 오류가 발생했습니다." })
+  }
+});
+
+const resourceQuery = (whereClause: any, queryParams: any[], order: string) => {
+  const tmpArr: string[] = [];
+  for (let key in whereClause) {
+    tmpArr.push(`${key} = $${queryParams.length + 1}`)
+    queryParams.push(whereClause[key]);
+  }
+
+  const query = `
+            SELECT
+              u.name,
+              u.dept,
+              u.position,
+              COALESCE(
+                JSON_AGG(
+                  JSON_BUILD_OBJECT(
+                    'project_id', pj.id,
+                    'project_name', pj.name,
+                    'project_start_date', TO_CHAR(pj.start_date, 'YYYY-MM-DD'),
+                    'project_end_date', TO_CHAR(pj.end_date, 'YYYY-MM-DD'),
+                    'mm_value', pt.mm_value,
+                    'user_start_date', TO_CHAR(pt.start_date, 'YYYY-MM-DD'),
+                    'user_end_date', TO_CHAR(pt.end_date, 'YYYY-MM-DD')
+                  )
+                ) FILTER (WHERE pj.id IS NOT NULL),
+                '[]'::json
+              ) AS project_list
+            FROM users AS u
+            LEFT JOIN participants AS pt ON u.id = pt.user_id
+            AND pt.start_date <= $1
+            AND pt.end_date >= $2
+            LEFT JOIN projects AS pj ON pt.project_id = pj.id AND pj.status != 'COMPLETED'
+            ${tmpArr.length > 0 ? 'WHERE ' + tmpArr.join(' AND ') : ''}
+            GROUP BY u.id
+            ORDER BY ${order} ASC, u.name ASC;
+        `;
+
+  return query;
+}
+
+router.get("/resource/dept", authMiddleware, async (req, res) => {
+  const userDept = (req as any).user?.dept;
+  const userAuth = (req as any).user?.auth;
+
+  const { target_date } = req.query as { target_date: string };
+
+  if (!target_date) {
+    return res.status(400).json({ message: "날짜(YYYY-MM)를 입력해주세요." });
+  }
+
+  const dateData = targetMonth(target_date);
+
+  if (!dateData) {
+    return res.status(400).json({ message: "잘못된 요청값 입니다." });
+  }
+
+  const { month, monthStart, monthEnd } = dateData;
+
+  try {
+    const queryParams: any[] = [monthEnd, monthStart];
+
+    const whereClause: any = {};
+
+    if (userAuth === 'USER') whereClause['u.dept'] = userDept;
+
+    const targetUsers = await pool.query(resourceQuery(whereClause, queryParams, 'u.dept'), queryParams);
+
+    const cstmUserData = targetUsers.rows;
+
+    return res.status(200).json({
+      message: `성공적으로 '${month}월'의 리소스 데이터를 가져왔습니다.`,
+      data: {
+        users: cstmUserData,
+      }
+    });
+  }
+  catch (err) {
+    console.error("리소스 데이터 조회 에러:", err);
+    return res.status(500).json({ message: "서버 오류가 발생했습니다." })
+  }
 });
 
 export default router;

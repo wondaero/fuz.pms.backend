@@ -215,12 +215,43 @@
 
       }
 
+      const makeQueryString = (data) => {
+        // undefined, null, 빈 문자열 등을 필터링한 깨끗한 객체 생성
+        const cleanData = Object.entries(data).reduce((acc, [key, val]) => {
+          if (val !== undefined && val !== null && val !== '') {
+            acc[key] = val;
+          }
+          return acc;
+        }, {});
+        // URLSearchParams가 인코딩을 알아서 처리해 줍니다.
+        return '?' + new URLSearchParams(cleanData).toString();
+      };
+
       document.getElementById('getPprojectResourceBtn').onclick = async (e) => {
         const project_id = e.target.closest('div').querySelector('[data-id="project"] input').value;
-        const targetDate = e.target.closest('div').querySelector('[data-id="date"] input').value;
+        const target_date = e.target.closest('div').querySelector('[data-id="date"] input').value;
         const token = window.localStorage.getItem('fuzDataToken');
 
-        const response = await fetch("http://localhost:3000/project/resource" + "?targetDate=" + targetDate + "&project_id=" + project_id, {
+        const response = await fetch("http://localhost:3000/user/resource/project" + makeQueryString({
+          target_date,
+          project_id
+        }), {
+          method: "GET",
+          headers: {
+            "Content-Type": "application/json",
+            "Authorization": `Bearer ${token}`
+          },
+        });
+
+      }
+
+      document.getElementById('getUserResource_deptBtn').onclick = async (e) => {
+        const target_date = e.target.closest('div').querySelector('[data-id="date"] input').value;
+        const token = window.localStorage.getItem('fuzDataToken');
+
+        const response = await fetch("http://localhost:3000/user/resource/dept" + makeQueryString({
+          target_date,
+        }), {
           method: "GET",
           headers: {
             "Content-Type": "application/json",
@@ -246,6 +277,7 @@
         <input type="text">
       </label>
       <button id="getPprojectResourceBtn">프로젝트 조회</button>
+      <button id="getUserResource_deptBtn">직원 조회(부서별)</button>
     </div>
   </div>
   <hr />
