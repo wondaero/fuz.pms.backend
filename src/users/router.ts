@@ -718,6 +718,38 @@ const targetMonth = (targetDate: string) => {
   return { month, monthStart, monthEnd };
 }
 
+/**
+ * @openapi
+ * /user/resource/project:
+ *   get:
+ *     summary: "프로젝트별 M/M 자원 현황 조회"
+ *     description: "특정 프로젝트 및 기간을 기준으로 투입된 인원과 그 인원들의 전체 참여 프로젝트 정보를 가져옵니다."
+ *     tags: [Users & Auth]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: query
+ *         name: project_id
+ *         required: true
+ *         schema:
+ *           type: integer
+ *         description: "조회할 프로젝트 ID"
+ *         example: 1
+ *       - in: query
+ *         name: target_date
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: "기준 연월 (YYYY-MM)"
+ *         example: "2026-07"
+ *     responses:
+ *       200:
+ *         description: "성공적으로 리소스 데이터를 가져왔습니다."
+ *       400:
+ *         description: "필수 파라미터 누락 또는 잘못된 형식"
+ *       500:
+ *         description: "서버 오류"
+ */
 router.get("/resource/project", authMiddleware, async (req, res) => {
   const { project_id, target_date } = req.query as { project_id?: string; target_date: string };
 
@@ -869,6 +901,31 @@ const resourceQuery = (whereClause: any, queryParams: any[], order: string) => {
   return query;
 }
 
+/**
+ * @openapi
+ * /user/resource/dept:
+ *   get:
+ *     summary: "직원별 프로젝트 투입 근황 조회 (부서별)"
+ *     description: "기준 연월 및 로그인한 유저의 부서에 속한 직원들의 프로젝트 투입 정보와 M/M 할당 현황을 조회합니다."
+ *     tags: [Users & Auth]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: query
+ *         name: target_date
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: "기준 연월 (YYYY-MM)"
+ *         example: "2026-07"
+ *     responses:
+ *       200:
+ *         description: "성공적으로 리소스 데이터를 가져왔습니다."
+ *       400:
+ *         description: "필수 파라미터 누락 또는 잘못된 형식"
+ *       500:
+ *         description: "서버 오류"
+ */
 router.get("/resource/dept", authMiddleware, async (req, res) => {
   const userDept = (req as any).user?.dept;
   const userAuth = (req as any).user?.auth;
@@ -910,5 +967,119 @@ router.get("/resource/dept", authMiddleware, async (req, res) => {
     return res.status(500).json({ message: "서버 오류가 발생했습니다." })
   }
 });
+
+
+router.get("/resource/assignable", authMiddleware, async (req, res) => {
+  const userAuth = (req as any).user?.auth;
+  if (userAuth === 'USER') {
+    return res.status(403).json({ message: "권한이 없습니다." });
+  }
+
+  const userDept = (req as any).user?.dept;
+  const MIN_AVAILABLUE_DAYS = 14;
+
+  const { project_id, role, assignable } = req.query as { project_id?: string; role?: string; assignable?: string };
+
+  if (!project_id) {
+    return res.status(400).json({ message: "프로젝트 아이디를 입력해주세요." });
+  }
+
+  try { // 🎯 3. try 블록 시작
+    // 1. 프로젝트 정보 조회
+    const projectQuery = `
+      SELECT
+        id,
+        name,
+        start_date,
+        end_date,
+        budget,
+        (end_date - start_date) + 1 AS project_days
+      FROM projects
+      WHERE id = $1;
+    `;
+
+    const targetProject = await pool.query(projectQuery, [parseInt(project_id, 10)]);
+
+    if (!targetProject || targetProject.rows.length === 0) {
+      return res.status(404).json({ message: "해당 프로젝트를 찾을 수 없습니다." });
+    }
+
+    const { start_date, end_date } = targetProject.rows[0];
+
+    // 2. 동적 파라미터 및 WHERE절 조립
+    const queryParams: any[] = [end_date, start_date];
+    const tmpArr: string[] = ["u.status = 'ACTIVE'"];
+
+    if (role) {
+      queryParams.push(role);
+      tmpArr.push(`u.role = $${queryParams.length}`);
+    }
+
+    const whereSql = tmpArr.length > 0 ? 'WHERE ' + tmpArr.join(' AND ') : '';
+
+    const havingClause = assignable === 'true'
+      ? `HAVING (($1::date - $2::date + 1) - COALESCE(SUM(GREATEST(LEAST(pt.end_date, $1::date) - GREATEST(pt.start_date, $2::date) + 1, 0) * pt.mm_value), 0.0)) >= ${MIN_AVAILABLUE_DAYS}`
+      : "";
+
+    // 3. 메인 가용 인원 조회 쿼리 정의
+    const assignableUserQuery = `
+      SELECT 
+        u.id,
+        u.name,
+        u.role,
+        u.level,
+        u.position,
+        u.monthly_cost,
+        ($1::date - $2::date + 1) AS total_proj_days,
+        
+        COALESCE(
+          SUM(
+            GREATEST(
+              LEAST(pt.end_date, $1::date) - GREATEST(pt.start_date, $2::date) + 1, 
+              0
+            ) * pt.mm_value
+          ), 
+          0.0
+        )::float AS occupied_days,
+        
+        ROUND(
+          (1.0 - (
+            COALESCE(
+              SUM(
+                GREATEST(LEAST(pt.end_date, $1::date) - GREATEST(pt.start_date, $2::date) + 1, 0) * pt.mm_value
+              ), 
+              0.0
+            ) / ($1::date - $2::date + 1)
+          ))::numeric * 100, 
+          1
+        )::float AS availability_percent
+        
+      FROM users u
+      LEFT JOIN participants pt ON u.id = pt.user_id
+        AND pt.start_date <= $1
+        AND pt.end_date >= $2
+      LEFT JOIN projects pj ON pt.project_id = pj.id AND pj.status != 'COMPLETED'
+      ${whereSql}
+      GROUP BY u.id
+      ${havingClause}
+      ORDER BY u.name ASC;
+    `;
+
+    // 🎯 2. 실제 데이터베이스 호출 실행 및 JSON 응답 반환
+    const targetUsers = await pool.query(assignableUserQuery, queryParams);
+
+    return res.status(200).json({
+      message: "성공적으로 투입 가능 직원 목록을 가져왔습니다.",
+      data: {
+        users: targetUsers.rows,
+      }
+    });
+
+  } catch (err) { // 🎯 3. 에러 캐치
+    console.error("투입 가능 직원 조회 에러:", err);
+    return res.status(500).json({ message: "서버 오류가 발생했습니다." });
+  }
+});
+
 
 export default router;
